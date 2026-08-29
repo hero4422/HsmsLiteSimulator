@@ -8,6 +8,7 @@ using System.Buffers.Binary;
 namespace HsmsLite.Protocol
 {
     // 10바이트 헤더
+    #region HSMS Header
     /// <summary>
     /// The fixed 10-byte HSMS message header (SEMI E37), sent immediately after the 4-byte
     /// message-length prefix on the wire.
@@ -21,6 +22,35 @@ namespace HsmsLite.Protocol
     ///   [5]   SType         - message type, see <see cref="HsmsSType"/>
     ///   [6-9] SystemBytes    - transaction id used to correlate a .req with its .rsp
     /// </summary>
+    /*
+        [0-1] SessionID: DeviceID, 장비 또는 장비 그룹 구분을 위한 디바이스 아이디
+        [2] Header Byte2
+            0: Control Message를 의미
+            0 이외의 값: 메세지의 Stream 넘버를 의미
+            * Stream 전송일 때
+            1byte = 8bit
+            8개의 비트 중 가장 앞의 비트가 1일 경우 Wait bit 임을 나타냄
+        [3] Header Byte3
+            0: Control Message를 의미
+            0 이외의 값: 메세지의 Function 넘버를 의미
+        [4] Ptype
+            0: SECS-II사용을 의미
+        [5] Stype
+            0: Data Message임을 정의. 데이터 전송을 의미
+            0 이외의 값: Control Message임을 정의
+            현 상태를 결정(1~9)
+            1: Select.req
+            2: Select.rsp
+            3: Deselect.req
+            4: Deselect.rsp
+            5: Linktest.req
+            6: Linktest.rsp
+            7: Reject.req
+            8: not used
+            9: Separate.req
+        [6-9] SystemByte: 통신 고유 ID값으로 통신할 때마다 고유값 전송
+    */
+    #endregion
     public readonly struct HsmsMessageHeader
     {
         

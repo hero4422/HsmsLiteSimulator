@@ -1,6 +1,7 @@
-﻿using HsmsLite.Protocol;
+﻿using HsmsLite.Gem;
+using HsmsLite.Protocol;
 using Serilog;
-using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
@@ -9,20 +10,17 @@ namespace HsmsLite.Host
     internal class Program
     {
         private static readonly string _logDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Log");
-
-        // 요청-응답 매칭용 딕셔너리 및 소켓 쓰기 동기화 락
-        private static readonly ConcurrentDictionary<uint, TaskCompletionSource<HsmsMessage>> _pendingRequests
-            = new ConcurrentDictionary<uint, TaskCompletionSource<HsmsMessage>>();
-        private static readonly SemaphoreSlim _writeLock = new SemaphoreSlim(1, 1);
+        private static ILogger _log = null!;
 
         public static async Task Main(string[] args)
         {
             // 로거 초기화
             ConfigureLogging();
+            _log = Log.ForContext<Program>(); // SourceContext를 채우려면 static Log.* 대신 컨텍스트 바인딩된 로거를 써야 함
 
             try
             {
-                Log.Information("HOST");
+                _log.Information("HOST");
 
                 var targetHost = args.Length > 0 ? args[0] : "127.0.0.1";
                 var port = ParsePort(args, defaultPort: 5000);
@@ -31,7 +29,7 @@ namespace HsmsLite.Host
             }
             catch (Exception ex)
             {
-                Log.Fatal(ex, "Host application terminated unexpectedly.");
+                _log.Fatal(ex, "Host application terminated unexpectedly.");
             }
             finally
             {
@@ -43,60 +41,81 @@ namespace HsmsLite.Host
         private static async Task RunHostClientAsync(string targetHost, int port)
         {
             using var client = new TcpClient();
-            Log.Information($"Connecting to {targetHost}:{port}");
+            _log.Information($"Connecting to {targetHost}:{port}");
             await client.ConnectAsync(targetHost, port);
 
             var stream = client.GetStream();
-            Log.Information("Tcp connected.");
+            _log.Information("Tcp connected.");
 
             var sm = new HsmsStateMachine();
             var sysBytes = new SystemBytesGenerator();
 
-            sm.StateChanged += (from, to) => Log.Information($"State: {from} -> {to}");
+            sm.StateChanged += (from, to) => _log.Information($"State: {from} -> {to}");
             sm.OnTcpConnected();
 
             using var cts = new CancellationTokenSource();
+            var responder = new HsmsRequestResponder(stream);
 
             // 백그라운드 메시지 수신 루프 시작
-            var receiveLoopTask = Task.Run(() => ReceiveLoopAsync(stream, sm, cts.Token));
+            var receiveLoopTask = Task.Run(() => ReceiveLoopAsync(responder, sm, cts.Token));
 
             try
             {
                 // Select 요청
-                var selectRsp = await SendAndWaitAsync(stream, HsmsMessage.Control(HsmsSType.SelectReq, sysBytes.Next()));
+                var selectRsp = await SendAndTraceAsync(responder, HsmsMessage.Control(HsmsSType.SelectReq, sysBytes.Next()));
                 var status = (HsmsSelectStatus)selectRsp.Header.Byte3;
-                Log.Information($"Select.rsp status = {status}");
+                _log.Information($"Select.rsp status = {status}");
 
                 if(status != HsmsSelectStatus.Ok)
                     throw new HsmsProtocolException($"Equipment refused Select: {status}");
 
                 sm.OnSelected();
 
-                // Equipment 상태 조회
-                var statusRsp = await SendAndWaitAsync(stream, HsmsMessage.DataText(1, 1, 1, sysBytes.Next(), "StatusRequest"));
-                Log.Information($"Equipment status: \"{statusRsp.BodyAsText()}\"");
+                // GEM Establish Communications
+                var commRsp = await SendAndTraceAsync(responder, S1Messages.BuildS1F13(1, sysBytes.Next()));
+                var (commAccepted, _, _) = S1Messages.ParseS1F14(commRsp);
+                if (!commAccepted)
+                    throw new HsmsProtocolException("Equipment denied Establish Communications (S1F14 COMMACK=denied).");
+                _log.Information("GEM communicating.");
 
-                // Unsolicited Event Report 수신 대기
+                // 장비 식별 조회
+                var idRsp = await SendAndTraceAsync(responder, S1Messages.BuildS1F1(1, sysBytes.Next()));
+                var (mdln, softRev) = S1Messages.ParseS1F2(idRsp);
+                _log.Information($"Equipment identity: MDLN={mdln} SOFTREV={softRev}");
+
+                // Equipment 상태 조회
+                var svids = new uint[] { 1, 2, 3 };
+                var statusRsp = await SendAndTraceAsync(responder, S1Messages.BuildS1F3(1, sysBytes.Next(), svids));
+                var values = S1Messages.ParseS1F4(statusRsp);
+                _log.Information($"Equipment status: {string.Join(", ", svids.Zip(values, (id, v) => $"SVID{id}={v}"))}");
+
+                // Host Command 전송
+                var cmdRsp = await SendAndTraceAsync(responder, S2Messages.BuildS2F41(1, sysBytes.Next(), "START"));
+                _log.Information($"S2F42 HCACK accepted={S2Messages.ParseS2F42(cmdRsp)}");
+
+                // Unsolicited Event Report(S6F11) 수신 대기
                 await Task.Delay(TimeSpan.FromSeconds(4.5));
 
                 // Linktest Keep-alive
-                var linktestRsp = await SendAndWaitAsync(stream, HsmsMessage.Control(HsmsSType.LinktestReq, sysBytes.Next()));
-                Log.Information("Linktest.rsp received - link is healthy.");
+                var linktestRsp = await SendAndTraceAsync(responder, HsmsMessage.Control(HsmsSType.LinktestReq, sysBytes.Next()));
+                _log.Information("Linktest.rsp received - link is healthy.");
 
                 // 추가 Event Report 수신 대기 후 세션 종료
                 await Task.Delay(TimeSpan.FromSeconds(4.5));
 
-                await WriteAsync(stream, HsmsMessage.Control(HsmsSType.SeparateReq, sysBytes.Next()));
-                Log.Information("Sent Separate.req - ending session.");
+                var separateReq = HsmsMessage.Control(HsmsSType.SeparateReq, sysBytes.Next());
+                _log.Information(HsmsCommTrace.Format("SEND", separateReq));
+                await responder.SendAsync(separateReq);
+                _log.Information("Sent Separate.req - ending session.");
                 sm.OnSeparatedOrDeselected();
             }
             catch (HsmsProtocolException ex)
             {
-                Log.Error($"Protocol error: {ex.Message}");
+                _log.Error($"Protocol error: {ex.Message}");
             }
             catch (TimeoutException ex)
             {
-                Log.Error($"Timeout error: {ex.Message}");
+                _log.Error($"Timeout error: {ex.Message}");
             }
             finally
             {
@@ -105,90 +124,78 @@ namespace HsmsLite.Host
                 sm.OnTcpDisconnected();
 
                 try { await receiveLoopTask; } catch { /* 수신 루프 종료 예외 무시 */ }
-                Log.Information("Host exiting.");
+                _log.Information("Host exiting.");
+            }
+        }
+
+        // 요청 전송 + 트랜잭션 시작/종료 마커 + SEND 트레이스를 한 번에 처리
+        private static async Task<HsmsMessage> SendAndTraceAsync(HsmsRequestResponder responder, HsmsMessage request,
+            TimeSpan? timeout = null, CancellationToken ct = default)
+        {
+            _log.Information(HsmsCommTrace.TransactionOpen(request));
+            _log.Information(HsmsCommTrace.Format("SEND", request));
+
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                var rsp = await responder.SendAndWaitAsync(request, timeout, ct).ConfigureAwait(false);
+                _log.Information(HsmsCommTrace.TransactionClose(request, sw.ElapsedMilliseconds));
+                return rsp;
+            }
+            catch
+            {
+                _log.Information(HsmsCommTrace.TransactionClose(request, sw.ElapsedMilliseconds) + " FAILED");
+                throw;
             }
         }
 
         //백그라운드 수신 루프(요청 응답 매칭 및 Unsolicited 이벤트 처리)
-        private static async Task ReceiveLoopAsync(NetworkStream stream, HsmsStateMachine sm, CancellationToken ct)
+        private static async Task ReceiveLoopAsync(HsmsRequestResponder responder, HsmsStateMachine sm, CancellationToken ct)
         {
             try
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    var msg = await HsmsFraming.ReadAsync(stream, ct);
+                    var msg = await responder.ReadAsync(ct);
                     if (msg is null)
                     {
-                        Log.Information("Equipment closed the TCP connection.");
+                        _log.Information("Equipment closed the TCP connection.");
                         return;
                     }
 
-                    Log.Information($"RECV {msg}");
+                    _log.Information(HsmsCommTrace.Format("RECV", msg));
                     sm.AssertValid(msg.Header.SType);
 
-                    // 대기 중인 요청이 있으면 TaskCompletionSource에 결과 전달
-                    if (_pendingRequests.TryRemove(msg.Header.SystemBytes, out var waiter))
-                    {
-                        waiter.TrySetResult(msg);
+                    if (responder.TryResolve(msg))
                         continue;
-                    }
 
                     // Await하는 요청이 없는 경우 -> Equipment의 자발적(Unsolicited) 메시지
-                    if (msg.Header.SType == HsmsSType.DataMessage)
+                    if (msg.Header.SType != HsmsSType.DataMessage)
+                        continue;
+
+                    var function = (byte)(msg.Header.Byte3 & 0x7F);
+                    if (msg.Header.Byte2 == 6 && function == 11)
                     {
-                        Log.Information($"  -> unsolicited event: \"{msg.BodyAsText()}\"");
+                        var (dataId, ceid, values) = S6Messages.ParseS6F11(msg);
+                        _log.Information($"  -> unsolicited S6F11 event: DATAID={dataId} CEID={ceid} values=[{string.Join(",", values)}]");
+                        var s6f12 = S6Messages.BuildS6F12(msg.Header.SessionId, msg.Header.SystemBytes, accepted: true);
+                        await responder.SendAsync(s6f12, ct);
+                        _log.Information(HsmsCommTrace.Format("SEND", s6f12));
+                    }
+                    else
+                    {
+                        _log.Information($"  -> unsolicited S{msg.Header.Byte2}F{function}, no handler.");
                     }
                 }
             }
             catch (OperationCanceledException) { }
             catch (HsmsProtocolException ex)
             {
-                Log.Error($"Protocol violation: {ex.Message}");
+                _log.Error($"Protocol violation: {ex.Message}");
             }
             catch (IOException)
             {
-                Log.Information("Connection lost while receiving.");
-            }
-        }
-
-        // 메시지 전송 (동시성 제어를 위한 SemaphoreSlim 적용)
-        private static async Task WriteAsync(NetworkStream stream, HsmsMessage msg)
-        {
-            await _writeLock.WaitAsync();
-            try
-            {
-                await HsmsFraming.WriteAsync(stream, msg, CancellationToken.None);
-                Log.Information($"SEND {msg}");
-            }
-            finally
-            {
-                _writeLock.Release();
-            }
-        }
-
-        // 요청 전송 및 응답 대기 (타임아웃 핸들링)
-        private static async Task<HsmsMessage> SendAndWaitAsync(NetworkStream stream, HsmsMessage request, TimeSpan? timeout = null)
-        {
-            var tcs = new TaskCompletionSource<HsmsMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _pendingRequests[request.Header.SystemBytes] = tcs;
-
-            await WriteAsync(stream, request);
-
-            using var timeoutCts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(10));
-            try
-            {
-                await using (timeoutCts.Token.Register(() => tcs.TrySetException(
-                    new TimeoutException($"Timed out waiting for response to SystemBytes={request.Header.SystemBytes}."))))
-                {
-                    return await tcs.Task;
-                }
-            }
-            finally
-            {
-                // Belt-and-suspenders: normally ReceiveLoopAsync already removed this entry when the
-                // response arrived. On timeout (or any other failure) it never does, so without this
-                // the entry would sit in _pendingRequests forever - clean it up unconditionally.
-                _pendingRequests.TryRemove(request.Header.SystemBytes, out _);
+                _log.Information("Connection lost while receiving.");
             }
         }
 
@@ -206,10 +213,10 @@ namespace HsmsLite.Host
                 .CreateLogger();
         }
 
-        // 포트 파싱 분리
+        // 포트 파싱 분리 (사용법: Host.exe [targetHost] [port])
         private static int ParsePort(string[] args, int defaultPort)
         {
-            if (args.Length > 0 && int.TryParse(args[0], out var port))
+            if (args.Length > 1 && int.TryParse(args[1], out var port))
             {
                 return port;
             }
