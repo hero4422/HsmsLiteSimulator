@@ -32,13 +32,16 @@ HsmsLiteSimulator/
 │   ├── Secs2FormatException.cs
 │   ├── GemMessage.cs          # S/F 헤더 구성 및 검증 공통 로직
 │   ├── GemMessageException.cs
+│   ├── GemMessageNames.cs     # SxFy / 제어 메시지 이름 매핑 (통신 로그용)
+│   ├── HsmsCommTrace.cs       # RECV/SEND 통신 트레이스 포맷 (hex dump + SECS-II 트리 + 트랜잭션 마커)
 │   ├── S1Messages.cs          # S1F1/F2, S1F13/F14, S1F3/F4
 │   ├── S2Messages.cs          # S2F41/F42 (Host Command)
 │   └── S6Messages.cs          # S6F11/F12 (Event Report)
 ├── HsmsLite.Host/             # Active 역할: Equipment에 접속하는 클라이언트
 ├── HsmsLite.Equipment/        # Passive 역할: 접속을 기다리는 서버
 ├── HsmsLite.Protocol.Tests/   # 프로토콜 레이어 유닛 테스트 (xUnit)
-└── HsmsLite.Gem.Tests/        # SECS-II 인코딩 / GEM 메시지 유닛 테스트 (xUnit)
+├── HsmsLite.Gem.Tests/        # SECS-II 인코딩 / GEM 메시지 유닛 테스트 (xUnit)
+└── docs/                      # 설계 노트 및 코드 정독 문서
 ```
 
 - **`HsmsLite.Protocol`** 은 `Stream` 기반으로만 동작해서 실제 소켓 없이도 유닛 테스트가
@@ -72,9 +75,41 @@ dotnet run --project HsmsLite.Equipment
 dotnet run --project HsmsLite.Host
 ```
 
-기본 포트는 `5000`이며, 각 앱의 첫 번째 인자로 포트를 바꿀 수 있습니다
-(`dotnet run --project HsmsLite.Equipment -- 6000`). 로그는 콘솔과
-`<앱 실행 폴더>/Log/log-yyyyMMdd.txt`에 함께 기록됩니다(Serilog).
+기본 포트는 `5000`입니다. 인자 구성은 두 앱이 다릅니다.
+
+- `Equipment.exe [port]` — 첫 번째 인자가 포트입니다. (`dotnet run --project HsmsLite.Equipment -- 6000`)
+- `Host.exe [targetHost] [port]` — 첫 번째 인자가 접속할 host, 두 번째 인자가 포트입니다.
+  (`dotnet run --project HsmsLite.Host -- 127.0.0.1 6000`)
+
+로그는 콘솔과 `<앱 실행 폴더>/Log/log-yyyyMMdd.txt`에 함께 기록됩니다(Serilog,
+`Log.ForContext<Program>()`으로 `SourceContext`까지 채워서 남깁니다).
+
+## 통신 로그 포맷
+
+RECV/SEND 메시지는 한 줄 요약이 아니라, 실제 SECS/GEM 드라이버 트레이스 로그처럼
+"요약 줄 + hex dump + 디코딩된 SECS-II 트리"를 함께 남깁니다(`HsmsCommTrace`). 또한 Host가
+보내는 모든 요청은 `GemMessageNames`로 이름을 붙이고, 응답을 기다리는 요청/응답 구간을
+`---- OPEN ----` / `---- CLOSE (ms) ----` 마커로 감싸서 트랜잭션 경계를 눈으로 바로 알 수
+있게 했습니다.
+
+```
+---- OPEN  S1F13 Establish Communications Request ----
+(SEND) S1  F13 (SType:0)  Establish Communications Request  - 08/29/26 18:55:59
+0000 >> 00 00 00 0c 00 01 01 8d 00 00 00 00 00 02 01 00
+    <L  0
+    > ..
+(RECV) S1  F14 (SType:0)  Establish Communications Request Acknowledge  - 08/29/26 18:55:59
+0000 >> 00 00 00 26 00 01 01 0e 00 00 00 00 00 02 01 02 25 01 01 01 02 41 0c 48 53 4d 53 4c 49 54 45 2d
+0020 >> 45 51 50 41 05 31 2e 30 2e 30
+    <L  2
+        <B  1 01 >
+        <L  2
+            <A  12 'HSMSLITE-EQP'>
+            <A  5 '1.0.0'>
+        > ..
+    > ..
+---- CLOSE S1F13 Establish Communications Request (12 ms) ----
+```
 
 ## 테스트
 
@@ -86,6 +121,14 @@ dotnet test HsmsLite.Gem.Tests
 `HsmsLite.Protocol.Tests`는 헤더/프레이밍 라운드트립, 상태 전이 정상/위반 케이스, SystemBytes
 단조 증가성을 검증합니다. `HsmsLite.Gem.Tests`는 SECS-II 아이템 인코딩/디코딩 라운드트립과
 S1/S2/S6 GEM 메시지의 빌드→파싱 라운드트립을 검증합니다.
+
+## 문서
+
+`docs/`에 설계 배경과 코드 정독 노트가 있습니다.
+
+- [gem-layer.md](docs/gem-layer.md) — `HsmsLite.Gem`을 왜 이런 모양으로 만들었는지
+- [hsms-message-header-walkthrough.md](docs/hsms-message-header-walkthrough.md) — `HsmsMessageHeader` 필드/메서드 정독
+- [gem-message-builder-walkthrough.md](docs/gem-message-builder-walkthrough.md) — `GemMessage`/`S1Messages` 정독
 
 ## 알려진 스코프 (Lite 구현이 다루지 않는 것)
 
