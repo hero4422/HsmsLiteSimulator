@@ -122,14 +122,6 @@ dotnet test HsmsLite.Gem.Tests
 단조 증가성을 검증합니다. `HsmsLite.Gem.Tests`는 SECS-II 아이템 인코딩/디코딩 라운드트립과
 S1/S2/S6 GEM 메시지의 빌드→파싱 라운드트립을 검증합니다.
 
-## 문서
-
-`docs/`에 설계 배경과 코드 정독 노트가 있습니다.
-
-- [gem-layer.md](docs/gem-layer.md) — `HsmsLite.Gem`을 왜 이런 모양으로 만들었는지
-- [hsms-message-header-walkthrough.md](docs/hsms-message-header-walkthrough.md) — `HsmsMessageHeader` 필드/메서드 정독
-- [gem-message-builder-walkthrough.md](docs/gem-message-builder-walkthrough.md) — `GemMessage`/`S1Messages` 정독
-
 ## 알려진 스코프 (Lite 구현이 다루지 않는 것)
 
 - SECS-II 아이템 인코딩은 GEM(SEMI E30) "표준" 메시지 세트(S1F1/F2, S1F13/F14, S1F3/F4,
