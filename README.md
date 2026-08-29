@@ -24,14 +24,27 @@ HsmsLiteSimulator/
 │   ├── HsmsSType.cs          # 메시지 타입 / Select 상태 코드
 │   ├── HsmsConnectionState.cs
 │   ├── SystemBytesGenerator.cs
+│   ├── HsmsRequestResponder.cs # SystemBytes 기준 요청/응답 상관관계 매칭 (Host/Equipment 공용)
 │   └── HsmsProtocolException.cs
-├── HsmsLite.Host/            # Active 역할: Equipment에 접속하는 클라이언트
-├── HsmsLite.Equipment/       # Passive 역할: 접속을 기다리는 서버
-└── HsmsLite.Protocol.Tests/  # 프로토콜 레이어 유닛 테스트 (xUnit)
+├── HsmsLite.Gem/              # GEM(SEMI E30) 메시지 레이어 - SECS-II 위에서 동작
+│   ├── Secs2Item.cs           # SECS-II 아이템 인코더/디코더 (List/ASCII/Boolean/U4)
+│   ├── Secs2List.cs / Secs2Ascii.cs / Secs2Boolean.cs / Secs2U4.cs
+│   ├── Secs2FormatException.cs
+│   ├── GemMessage.cs          # S/F 헤더 구성 및 검증 공통 로직
+│   ├── GemMessageException.cs
+│   ├── S1Messages.cs          # S1F1/F2, S1F13/F14, S1F3/F4
+│   ├── S2Messages.cs          # S2F41/F42 (Host Command)
+│   └── S6Messages.cs          # S6F11/F12 (Event Report)
+├── HsmsLite.Host/             # Active 역할: Equipment에 접속하는 클라이언트
+├── HsmsLite.Equipment/        # Passive 역할: 접속을 기다리는 서버
+├── HsmsLite.Protocol.Tests/   # 프로토콜 레이어 유닛 테스트 (xUnit)
+└── HsmsLite.Gem.Tests/        # SECS-II 인코딩 / GEM 메시지 유닛 테스트 (xUnit)
 ```
 
 - **`HsmsLite.Protocol`** 은 `Stream` 기반으로만 동작해서 실제 소켓 없이도 유닛 테스트가
   가능합니다. `Host`/`Equipment`는 이 위에 `TcpClient`/`TcpListener`를 얹은 애플리케이션입니다.
+- **`HsmsLite.Gem`** 은 `Protocol`이 모르는 SECS-II/GEM 의미를 다루는 별도 레이어입니다.
+  `Protocol`은 SEMI E37 전송 전용을 유지하고, `Host`/`Equipment`가 둘 다 참조합니다.
 - HSMS-SS(Single Session) 특성상 Equipment는 한 번에 하나의 연결만 처리합니다. 세션이 끝나야
   다음 접속을 받는 것은 버그가 아니라 스펙에 맞는 동작입니다.
 
@@ -39,10 +52,13 @@ HsmsLiteSimulator/
 
 1. Equipment가 지정한 포트에서 대기
 2. Host가 접속 후 `Select.req` 전송 → `SELECTED` 상태 진입
-3. Host가 `StatusRequest`를 보내고 Equipment가 상태 정보로 응답
-4. Equipment가 4초 간격으로 이벤트 리포트(Unsolicited Data Message)를 자발적으로 송신
-5. Host가 `Linktest.req`로 연결 상태 확인
-6. Host가 `Separate.req`를 보내 세션 종료
+3. Host가 `S1F13`(Establish Communications)를 보내고 Equipment가 `S1F14`(COMMACK)로 응답
+4. Host가 `S1F1`(Are You There) → Equipment가 `S1F2`(MDLN/SOFTREV)로 장비 식별 응답
+5. Host가 `S1F3`(Status Request)로 SVID 목록을 조회 → Equipment가 `S1F4`로 값 응답
+6. Host가 `S2F41`(Host Command "START") → Equipment가 `S2F42`(HCACK)로 응답
+7. Equipment가 4초 간격으로 `S6F11`(Event Report)을 자발적으로 송신 → Host가 `S6F12`로 ack
+8. Host가 `Linktest.req`로 연결 상태 확인
+9. Host가 `Separate.req`를 보내 세션 종료
 
 ## 실행 방법
 
@@ -64,15 +80,23 @@ dotnet run --project HsmsLite.Host
 
 ```bash
 dotnet test HsmsLite.Protocol.Tests
+dotnet test HsmsLite.Gem.Tests
 ```
 
-헤더/프레이밍 라운드트립, 상태 전이 정상/위반 케이스, SystemBytes 단조 증가성을 검증합니다.
+`HsmsLite.Protocol.Tests`는 헤더/프레이밍 라운드트립, 상태 전이 정상/위반 케이스, SystemBytes
+단조 증가성을 검증합니다. `HsmsLite.Gem.Tests`는 SECS-II 아이템 인코딩/디코딩 라운드트립과
+S1/S2/S6 GEM 메시지의 빌드→파싱 라운드트립을 검증합니다.
 
 ## 알려진 스코프 (Lite 구현이 다루지 않는 것)
 
-- SECS-II 아이템(가변 길이 바이너리 인코딩) 대신 UTF-8 텍스트를 바디로 사용합니다. 실제
-  SECS-II 아이템 인코딩/디코딩은 범위 밖입니다.
+- SECS-II 아이템 인코딩은 GEM(SEMI E30) "표준" 메시지 세트(S1F1/F2, S1F13/F14, S1F3/F4,
+  S2F41/F42, S6F11/F12)를 표현하는 데 필요한 최소한의 타입만 지원합니다: List, ASCII,
+  Boolean, U4. Binary, I1~I8, U1/U2/U8, F4/F8, JIS-8, 2-byte 문자열은 지원하지 않으며,
+  디코더가 인식하지 못하는 포맷 코드를 만나면 `Secs2FormatException`을 던집니다.
+- COMMACK(S1F14)/HCACK(S2F42)/ACKC6(S6F12)은 실제 SEMI 표준의 Binary 1바이트 ack 코드 대신,
+  수락/거부 두 가지만 표현하는 SECS-II `Boolean`으로 단순화했습니다.
+- 멀티블록 메시지(하나의 SECS-II 메시지가 여러 HSMS 프레임에 걸치는 경우)는 지원하지 않습니다.
 - `Deselect.req/rsp`, `Reject.req`는 상태 머신 검증 로직과 열거형에는 존재하지만, 데모
   시나리오에서 실제로 생성/전송되지는 않습니다(정상 경로는 Select → Separate만 사용).
 - T3/T5/T6/T7 등 SEMI E37의 conformance 타이머는 구현하지 않았습니다. 요청/응답 타임아웃은
-  Host 쪽에서 별도로 간단히 처리합니다.
+  `HsmsRequestResponder`에서 간단히 처리합니다.
