@@ -1,12 +1,10 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="HsmsLite.Equipment/HsmsLite.Equipment.csproj" />
-    <Project Path="HsmsLite.Gem/HsmsLite.Gem.csproj" />
     <Project Path="HsmsLite.Host/HsmsLite.Host.csproj" />
     <Project Path="HsmsLite.Protocol/HsmsLite.Protocol.csproj" />
   </Folder>
   <Folder Name="/test/">
-    <Project Path="HsmsLite.Gem.Tests/HsmsLite.Gem.Tests.csproj" />
     <Project Path="HsmsLite.Protocol.Tests/HsmsLite.Protocol.Tests.csproj" />
   </Folder>
 </Solution>

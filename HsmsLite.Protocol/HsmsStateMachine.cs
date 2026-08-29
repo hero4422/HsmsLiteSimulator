@@ -72,7 +72,7 @@ namespace HsmsLite.Protocol
 
                 case HsmsSType.LinktestReq:
                 case HsmsSType.LinktestRsp:
-                    if (State == HsmsConnectionState.NotConnected)
+                    if(State == HsmsConnectionState.NotConnected)
                         throw new HsmsProtocolException($"{sType} received before TCP connection was established.");
                     break;
 

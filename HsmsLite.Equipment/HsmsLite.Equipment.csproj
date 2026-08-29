@@ -14,7 +14,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\HsmsLite.Gem\HsmsLite.Gem.csproj" />
     <ProjectReference Include="..\HsmsLite.Protocol\HsmsLite.Protocol.csproj" />
   </ItemGroup>
 
