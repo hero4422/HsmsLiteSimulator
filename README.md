@@ -40,8 +40,7 @@ HsmsLiteSimulator/
 ├── HsmsLite.Host/             # Active 역할: Equipment에 접속하는 클라이언트
 ├── HsmsLite.Equipment/        # Passive 역할: 접속을 기다리는 서버
 ├── HsmsLite.Protocol.Tests/   # 프로토콜 레이어 유닛 테스트 (xUnit)
-├── HsmsLite.Gem.Tests/        # SECS-II 인코딩 / GEM 메시지 유닛 테스트 (xUnit)
-└── docs/                      # 설계 노트 및 코드 정독 문서
+└── HsmsLite.Gem.Tests/        # SECS-II 인코딩 / GEM 메시지 유닛 테스트 (xUnit)
 ```
 
 - **`HsmsLite.Protocol`** 은 `Stream` 기반으로만 동작해서 실제 소켓 없이도 유닛 테스트가
